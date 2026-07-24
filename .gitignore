@@ -1,0 +1,12 @@
+bin/
+data/
+runtime/
+.env
+.env.local
+*.log
+server/profile-cert.pem
+server/profile-key.pem
+server/apphub-server
+.DS_Store
+web/node_modules/
+web/dist/
