@@ -46,6 +46,121 @@ func makeZIP(t *testing.T, extension string, files map[string][]byte) string {
 
 func png() []byte { return append([]byte("\x89PNG\r\n\x1a\n"), []byte("image")...) }
 
+func pngWithSize(width, height int) []byte {
+	data := append([]byte("\x89PNG\r\n\x1a\n"), 0, 0, 0, 13)
+	data = append(data, []byte("IHDR")...)
+	data = append(data, byte(width>>24), byte(width>>16), byte(width>>8), byte(width))
+	data = append(data, byte(height>>24), byte(height>>16), byte(height>>8), byte(height))
+	return append(data, []byte("filler")...)
+}
+
+func webpWithSize(width, height int) []byte {
+	data := append([]byte("RIFF"), 0, 0, 0, 0)
+	data = append(data, []byte("WEBP")...)
+	data = append(data, []byte("VP8X")...)
+	data = append(data, 10, 0, 0, 0)
+	data = append(data, 0, 0, 0, 0)
+	data = append(data, byte(width-1), byte((width-1)>>8), byte((width-1)>>16))
+	data = append(data, byte(height-1), byte((height-1)>>8), byte((height-1)>>16))
+	return append(data, 0, 0, 0, 0)
+}
+
+func appleOptimizedPNG(width, height int) []byte {
+	data := append([]byte("\x89PNG\r\n\x1a\n"), 0, 0, 0, 4)
+	data = append(data, []byte("CgBI")...)
+	data = append(data, 0x50, 0x00, 0x20, 0x06) // chunk data
+	data = append(data, 0, 0, 0, 0)             // chunk CRC
+	return append(data, pngWithSize(width, height)[8:]...)
+}
+
+func TestImageDimensionsHandlesAppleOptimizedPNG(t *testing.T) {
+	if width, height := imageDimensions(appleOptimizedPNG(120, 120), "image/png"); width != 120 || height != 120 {
+		t.Fatalf("expected 120x120, got %dx%d", width, height)
+	}
+}
+
+func TestNormalizeIconConvertsAppleOptimizedPNG(t *testing.T) {
+	converted := pngWithSize(120, 120)
+	parser := &Parser{Runner: fakeRunner{run: func(name string, args ...string) ([]byte, error) {
+		if filepath.Base(name) != "sips" {
+			return nil, fmt.Errorf("unexpected tool: %s", name)
+		}
+		if err := os.WriteFile(args[len(args)-1], converted, 0o600); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}}}
+	icon, mime := parser.normalizeIcon(context.Background(), appleOptimizedPNG(120, 120), "image/png")
+	if mime != "image/png" || string(icon) != string(converted) {
+		t.Fatal("Apple-optimized icon was not converted to a standard PNG")
+	}
+	plain := pngWithSize(120, 120)
+	if icon, _ := parser.normalizeIcon(context.Background(), plain, "image/png"); string(icon) != string(plain) {
+		t.Fatal("standard PNG should be stored unchanged")
+	}
+}
+
+func zipEntries(t *testing.T, path string) []*zip.File {
+	t.Helper()
+	archive, err := zip.OpenReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { archive.Close() })
+	return archive.File
+}
+
+func TestFindIPAIconIgnoresNestedBundlesAndPrefersPrimaryIcon(t *testing.T) {
+	rootPhone := pngWithSize(120, 120)
+	path := makeZIP(t, ".zip", map[string][]byte{
+		"Payload/Demo.app/AppIcon60x60@2x.png":      rootPhone,
+		"Payload/Demo.app/AppIcon76x76@2x~ipad.png": pngWithSize(152, 152),
+		"Payload/Demo.app/Frameworks/App.framework/flutter_assets/packages/feature/assets/unit/speak_record_icon.png": pngWithSize(80, 80),
+		"Payload/Demo.app/PlugIns/Widget.app/AppIcon40x40@2x.png":                                                     pngWithSize(240, 240),
+	})
+	icon, mime := findIPAIcon(zipEntries(t, path), []string{"AppIcon60x60", "AppIcon"})
+	if mime != "image/png" || string(icon) != string(rootPhone) {
+		t.Fatalf("expected the bundle root AppIcon60x60@2x.png, got %d bytes of %s", len(icon), mime)
+	}
+}
+
+func TestFindIPAIconFallsBackToLargestPhoneIcon(t *testing.T) {
+	largest := pngWithSize(167, 167)
+	path := makeZIP(t, ".zip", map[string][]byte{
+		"Payload/Demo.app/Icon-App-40x40@3x.png":      pngWithSize(120, 120),
+		"Payload/Demo.app/Icon-App-83.5x83.5@2x.png":  largest,
+		"Payload/Demo.app/Icon-App-76x76@2x~ipad.png": pngWithSize(152, 152),
+	})
+	icon, _ := findIPAIcon(zipEntries(t, path), nil)
+	if string(icon) != string(largest) {
+		t.Fatal("expected the largest non-iPad app bundle icon")
+	}
+}
+
+func TestFindAPKIconSkipsAdaptiveLayersAndPrefersLargestLauncher(t *testing.T) {
+	launcher := pngWithSize(192, 192)
+	path := makeZIP(t, ".zip", map[string][]byte{
+		"res/mipmap-mdpi/ic_launcher.png":               pngWithSize(48, 48),
+		"res/mipmap-xxxhdpi/ic_launcher.png":            launcher,
+		"res/mipmap-xxxhdpi/ic_launcher_round.png":      pngWithSize(192, 192),
+		"res/mipmap-xxxhdpi/ic_launcher_foreground.png": pngWithSize(432, 432),
+		"res/mipmap-xxxhdpi/ic_launcher_background.png": pngWithSize(432, 432),
+	})
+	icon, mime := findAPKIcon(zipEntries(t, path))
+	if mime != "image/png" || string(icon) != string(launcher) {
+		t.Fatal("expected the largest plain launcher icon")
+	}
+}
+
+func TestFindAPKIconAcceptsWebPLauncher(t *testing.T) {
+	icon, mime := findAPKIcon(zipEntries(t, makeZIP(t, ".zip", map[string][]byte{
+		"res/mipmap-xxhdpi/ic_launcher.webp": webpWithSize(144, 144),
+	})))
+	if mime != "image/webp" || len(icon) == 0 {
+		t.Fatalf("expected a WebP launcher icon, got %d bytes of %s", len(icon), mime)
+	}
+}
+
 func TestExecRunnerKeepsSuccessfulStderrOutOfParsedOutput(t *testing.T) {
 	output, err := (ExecRunner{}).Run(
 		context.Background(),
@@ -110,8 +225,12 @@ func TestParseAPK(t *testing.T) {
 	}
 }
 
-func TestParseEnterpriseAndAdHocIPA(t *testing.T) {
-	for _, test := range []struct{ name, allDevices, devices, expected string }{{"enterprise", "true", "", "enterprise"}, {"ad-hoc", "false", `["UDID"]`, "ad-hoc"}} {
+func TestParseSupportedIPA(t *testing.T) {
+	for _, test := range []struct{ name, allDevices, devices, development, expected string }{
+		{"enterprise", "true", "", "false", "enterprise"},
+		{"ad-hoc", "false", `["UDID"]`, "false", "ad-hoc"},
+		{"development", "false", `["UDID"]`, "true", "development"},
+	} {
 		t.Run(test.name, func(t *testing.T) {
 			runner := fakeRunner{run: func(name string, args ...string) ([]byte, error) {
 				switch filepath.Base(name) {
@@ -121,7 +240,7 @@ func TestParseEnterpriseAndAdHocIPA(t *testing.T) {
 					return []byte("<?xml version=\"1.0\"?><plist><dict/></plist>"), nil
 				case "plutil":
 					key := args[1]
-					values := map[string]string{"CFBundleIdentifier": "com.example.ios", "CFBundleShortVersionString": "2.0", "CFBundleVersion": "20", "CFBundleDisplayName": "iOS Demo", "MinimumOSVersion": "15.0", "ProvisionsAllDevices": test.allDevices, "ProvisionedDevices": test.devices, "Entitlements.get-task-allow": "false", "ExpirationDate": "2027-01-02T03:04:05Z"}
+					values := map[string]string{"CFBundleIdentifier": "com.example.ios", "CFBundleShortVersionString": "2.0", "CFBundleVersion": "20", "CFBundleDisplayName": "iOS Demo", "MinimumOSVersion": "15.0", "ProvisionsAllDevices": test.allDevices, "ProvisionedDevices": test.devices, "Entitlements.get-task-allow": test.development, "ExpirationDate": "2027-01-02T03:04:05Z"}
 					if value := values[key]; value != "" {
 						return []byte(value), nil
 					}

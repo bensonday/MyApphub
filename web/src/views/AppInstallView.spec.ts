@@ -51,6 +51,7 @@ async function render() {
     history: createMemoryHistory(),
     routes: [
       { path: '/app/:slug', component: AppInstallView },
+      { path: '/udid', component: { template: '<div>UDID</div>' } },
       { path: '/404', component: { template: '<div>404</div>' } },
     ],
   })
@@ -127,6 +128,20 @@ describe('App install page API states', () => {
     expect(wrapper.text()).toContain('iOS')
     expect(mocks.access).toHaveBeenLastCalledWith('whatsapp', '', 'ios')
     expect(mocks.getApp).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('shows UDID help without an IPA download for a development-signed release', async () => {
+    mocks.getApp.mockResolvedValue({
+      app: { ...app, platform: 'ios' },
+      version: { ...response.version, packageFile: 'package.ipa', distributionType: 'development' },
+    })
+    mocks.access.mockResolvedValue({ downloadUrl: '#demo-download', installUrl: '#demo-install', expiresAt: '2099-01-01T00:00:00Z' })
+    const wrapper = await render()
+    await flushPromises()
+    expect(wrapper.text()).toContain('Development 包仅限描述文件中已注册的设备')
+    expect(wrapper.text()).toContain('获取设备 UDID')
+    expect(wrapper.text()).not.toContain('下载 IPA')
     wrapper.unmount()
   })
 })

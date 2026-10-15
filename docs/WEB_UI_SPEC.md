@@ -233,8 +233,7 @@ UDID 页使用单卡片步骤流，桌面最大宽度 680px，手机使用单列
 - 可以使用一个经过锁定版本的小型二维码生成库；不能调用外部二维码服务。
 - 不引入大型 UI 组件库，基础组件使用项目内 Vue/CSS 实现。
 - 所有 API 请求封装在统一客户端，处理超时、错误格式和令牌过期。
-- Vue 构建产物保留在独立的 `web/dist` 目录，由静态服务器单独托管；Go 服务不读取前端文件。Web 通过构建变量配置 API Origin，生产环境不需要运行 Node 服务。
-- 前后端使用不同 Origin 时，静态站点的 CSP `connect-src` 与 `img-src` 必须包含 API Origin，同时服务端 CORS 白名单必须包含 Web Origin。
+- Vue 构建产物保留在 `web/dist`，与 TypeScript Worker 一起部署为 Cloudflare Workers Static Assets；API 与页面使用同一 Origin，生产环境不需要运行 Node 服务。
 
 ## 11. 可访问性与兼容性
 

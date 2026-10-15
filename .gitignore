@@ -10,3 +10,7 @@ server/apphub-server
 .DS_Store
 web/node_modules/
 web/dist/
+.wrangler/
+.dev.vars
+.secrets/
+web/node_modules/.tmp/

@@ -59,7 +59,8 @@ type UploadMetadata struct {
 }
 
 type UploadResult struct {
-	App       PublicApp `json:"app"`
-	Version   Version   `json:"version"`
-	Duplicate bool      `json:"duplicate"`
+	App         PublicApp `json:"app"`
+	Version     Version   `json:"version"`
+	Duplicate   bool      `json:"duplicate"`
+	IconUpdated bool      `json:"iconUpdated"`
 }

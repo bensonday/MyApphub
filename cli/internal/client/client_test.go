@@ -84,43 +84,45 @@ func TestClientValidationAndAPIError(t *testing.T) {
 	}
 }
 
-func TestStreamingUploadMultipartAndProgress(t *testing.T) {
+func TestChunkedUploadAndProgress(t *testing.T) {
+
 	content := []byte("PK\x03\x04streamed-package")
 	path := filepath.Join(t.TempDir(), "app.apk")
 	if err := os.WriteFile(path, content, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	metadata := model.UploadMetadata{Platform: model.PlatformAndroid, Identifier: "com.example.demo", Name: "Demo", VersionName: "1", BuildNumber: "1", FileSize: int64(len(content)), SHA256: strings.Repeat("a", 64), Promote: true}
+	paths := make([]string, 0)
 	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		reader, err := request.MultipartReader()
-		if err != nil {
-			t.Fatal(err)
-		}
-		names := make([]string, 0, 3)
-		for {
-			part, err := reader.NextPart()
-			if err == io.EOF {
-				break
+		paths = append(paths, request.Method+" "+request.URL.Path)
+		switch request.URL.Path {
+		case "/api/v1/uploads":
+			var received model.UploadMetadata
+			if json.NewDecoder(request.Body).Decode(&received) != nil || received.Identifier != metadata.Identifier {
+				t.Fatal("metadata was not sent correctly")
 			}
-			if err != nil {
-				t.Fatal(err)
+			return response(201, `{"id":"upload-id","partSize":8388608}`), nil
+		case "/api/v1/uploads/upload-id/parts/1":
+			data, _ := io.ReadAll(request.Body)
+			if string(data) != string(content) || request.Header.Get("X-Part-SHA256") == "" {
+				t.Fatal("package part or checksum mismatch")
 			}
-			names = append(names, part.FormName())
-			data, _ := io.ReadAll(part)
-			if part.FormName() == "metadata" {
-				var received model.UploadMetadata
-				if json.Unmarshal(data, &received) != nil || received.Identifier != metadata.Identifier {
-					t.Fatal("metadata was not streamed correctly")
+			return response(200, `{"partNumber":1,"etag":"test-etag"}`), nil
+		case "/api/v1/uploads/upload-id/complete":
+			var body struct {
+				Parts []struct {
+					PartNumber int
+					ETag       string
 				}
 			}
-			if part.FormName() == "package" && string(data) != string(content) {
-				t.Fatal("package content mismatch")
+			if json.NewDecoder(request.Body).Decode(&body) != nil || len(body.Parts) != 1 || body.Parts[0].ETag != "test-etag" {
+				t.Fatal("completion parts mismatch")
 			}
+			return response(201, `{"app":{"slug":"demo"},"version":{"id":"v1"}}`), nil
+		default:
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.Path)
+			return nil, nil
 		}
-		if strings.Join(names, ",") != "metadata,package" {
-			t.Fatalf("unexpected part order: %v", names)
-		}
-		return response(201, `{"app":{"slug":"demo"},"version":{"id":"v1"}}`), nil
 	})
 	client := &Client{BaseURL: "https://hub.example", Token: strings.Repeat("t", 32), HTTP: &http.Client{Transport: transport}}
 	progress := &strings.Builder{}
@@ -128,7 +130,45 @@ func TestStreamingUploadMultipartAndProgress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.App.Slug != "demo" || !strings.Contains(progress.String(), "100%") {
+	if result.App.Slug != "demo" || !strings.Contains(progress.String(), "100.0%") || len(paths) != 3 {
 		t.Fatalf("unexpected result/progress: %+v %q", result, progress.String())
+	}
+}
+
+func TestDuplicateUploadRefreshesIcon(t *testing.T) {
+	content := []byte("PK\x03\x04stored-package")
+	path := filepath.Join(t.TempDir(), "app.ipa")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	icon := []byte("\x89PNG\r\n\x1a\nicon-bytes")
+	metadata := model.UploadMetadata{Platform: model.PlatformIOS, Identifier: "com.example.demo", Name: "Demo", VersionName: "1", BuildNumber: "1", FileSize: int64(len(content)), SHA256: strings.Repeat("a", 64), Promote: true, IconMIME: "image/png"}
+	refreshed := false
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/api/v1/uploads":
+			return response(200, `{"duplicate":true,"app":{"slug":"demo"},"version":{"id":"v1"}}`), nil
+		case "/api/v1/apps/demo/ios/icon":
+			if request.Method != http.MethodPut {
+				t.Fatalf("icon refresh used %s", request.Method)
+			}
+			data, _ := io.ReadAll(request.Body)
+			if string(data) != string(icon) {
+				t.Fatal("icon bytes were not sent")
+			}
+			refreshed = true
+			return response(200, `{"icon":"icon-refreshed.png"}`), nil
+		default:
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.Path)
+			return nil, nil
+		}
+	})
+	client := &Client{BaseURL: "https://hub.example", Token: strings.Repeat("t", 32), HTTP: &http.Client{Transport: transport}}
+	result, err := client.Upload(context.Background(), path, metadata, icon, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Duplicate || !result.IconUpdated || !refreshed {
+		t.Fatalf("stored icon was not refreshed: %+v", result)
 	}
 }

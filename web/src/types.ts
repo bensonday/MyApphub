@@ -31,7 +31,7 @@ export interface AppVersion {
 
 export interface PublicRelease { app: PublicApp; version: AppVersion }
 export interface PublicAppResponse extends PublicRelease { variants?: PublicRelease[] }
-export interface AccessResponse { downloadUrl?: string; installUrl?: string; expiresAt: string }
+export interface AccessResponse { downloadUrl?: string; installUrl?: string; releaseNotes?: string; expiresAt: string }
 export interface UdidSessionResponse { challenge: string; profileUrl: string; resultUrl: string }
 export interface UdidResultResponse { pending: boolean; udid?: string | null }
 export interface ProjectConfigResponse { projectName: string }

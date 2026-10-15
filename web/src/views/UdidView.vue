@@ -72,7 +72,7 @@ onBeforeUnmount(() => { window.clearTimeout(timer); document.removeEventListener
 <template>
   <PageAtmosphere accent-rgb="152, 108, 255" accent-foreground="#ffffff"><main class="public-page narrow-page"><div class="release-status"><span class="verified-dot"></span><span>PRIVATE DEVICE TOOL</span><span class="release-serial">30 MINUTE SESSION</span></div>
     <StatusNotice v-if="!environmentOk" tone="warning" title="请使用 iPhone 或 iPad 的 Safari">当前浏览器不能安装 Apple 描述文件。你仍可查看流程，但无法开始。</StatusNotice>
-    <section class="single-panel udid-panel"><span class="panel-cross" aria-hidden="true">+</span><h1>获取设备<br />UDID.</h1><p class="page-lede">只为把当前 iPhone 或 iPad 加入测试设备。临时结果会在 30 分钟后自动删除。</p>
+    <section class="single-panel udid-panel"><span class="panel-cross" aria-hidden="true">+</span><h1>获取设备<br />UDID.</h1><p class="page-lede">只为把当前 iPhone 或 iPad 加入测试设备。临时结果会在 30 分钟后自动删除。安装时请核对签名者“AppHub UDID Profile Signing”；当前签名可能显示为未验证。</p>
       <div class="step-grid"><div v-for="step in 3" :key="step" class="udid-step" :class="{ active: activeStep === step, complete: activeStep > step }"><span>0{{ step }}</span><strong>{{ ['下载描述文件', '前往设置安装', '返回并复制'][step - 1] }}</strong><small>{{ ['使用 Safari 开始', '按系统提示完成', '发送给开发者'][step - 1] }}</small></div></div>
       <div v-if="state === 'waiting'" class="waiting-panel" role="status"><span class="waiting-orbit" aria-hidden="true"></span><div><strong>仍在等待安装结果</strong><p>请前往“设置”安装描述文件，完成后返回 Safari。</p></div></div>
       <div v-else-if="state === 'success'" class="result-panel"><span>YOUR DEVICE UDID</span><code>{{ udid }}</code></div>

@@ -50,6 +50,7 @@ const actionLabel = computed(() => isIos.value ? '直接安装' : '下载 APK')
 const installUrl = computed(() => isIos.value ? access.value?.installUrl : access.value?.downloadUrl)
 const notesLong = computed(() => (version.value?.releaseNotes?.length ?? 0) > 240)
 const isAdHoc = computed(() => version.value?.distributionType?.toLowerCase().includes('ad') ?? false)
+const isDevelopment = computed(() => version.value?.distributionType === 'development')
 const expiresSoon = computed(() => {
   if (!version.value?.provisioningExpiresAt) return false
   const remaining = new Date(version.value.provisioningExpiresAt).getTime() - Date.now()
@@ -98,7 +99,10 @@ async function unlock() {
   if (!password.value || submitting.value || retry.active.value) return
   submitting.value = true
   passwordError.value = ''
-  try { access.value = await api.access(slug.value, password.value, app.value?.platform) }
+  try {
+    access.value = await api.access(slug.value, password.value, app.value?.platform)
+    if (data.value && access.value.releaseNotes) data.value.version.releaseNotes = access.value.releaseNotes
+  }
   catch (error) {
     if (error instanceof ApiError && error.code === 'invalid_password') passwordError.value = '密码不正确，请重试。'
     else if (error instanceof ApiError && error.code === 'rate_limited') {
@@ -126,8 +130,9 @@ async function install() {
   } finally {
     submitting.value = false
   }
-  if (installUrl.value?.startsWith('#demo')) return
-  if (installUrl.value) window.location.assign(installUrl.value)
+  const target = installUrl.value
+  if (target?.startsWith('#demo')) return
+  if (target) window.location.assign(target)
 }
 
 async function selectPlatform(platform: Platform) {
@@ -199,10 +204,11 @@ watch(slug, load)
 
             <template v-else>
               <section v-if="version.releaseNotes" class="release-notes"><h2>WHAT'S NEW</h2><p :class="{ 'notes-collapsed': notesLong && !notesExpanded }">{{ version.releaseNotes }}</p><button v-if="notesLong" class="text-action" type="button" @click="notesExpanded = !notesExpanded">{{ notesExpanded ? '收起' : '展开全部' }}</button></section>
-              <button class="primary-action mobile-priority" type="button" :disabled="!installUrl || submitting || retry.active.value" @click="install"><span>{{ retry.active.value ? `${retry.seconds.value} 秒后重试` : submitting ? '正在生成链接…' : installUrl ? actionLabel : '暂无可安装版本' }}</span><span class="action-arrow">↗</span></button>
+              <button class="primary-action mobile-priority" type="button" :disabled="!installUrl || submitting || retry.active.value" @click="install()"><span>{{ retry.active.value ? `${retry.seconds.value} 秒后重试` : submitting ? '正在生成链接…' : installUrl ? actionLabel : '暂无可安装版本' }}</span><span class="action-arrow">↗</span></button>
               <p v-if="isAdHoc" class="ad-hoc-note">Ad Hoc 包仅能安装在已加入描述文件的设备上。获取 UDID 不代表当前包可以立即安装。</p>
+              <p v-if="isDevelopment" class="ad-hoc-note">Development 包仅限描述文件中已注册的设备，且需启用开发者模式。</p>
               <details class="install-guide"><summary>{{ isIos ? '首次安装如何信任开发者' : 'Android 安装说明' }}<span>查看步骤 →</span></summary><ol v-if="isIos"><li>点击“直接安装”并确认系统安装提示。</li><li>首次打开失败时，前往系统设置中的设备管理页面信任企业开发者。</li><li>iOS/iPadOS 18 及以上若系统要求，重启设备后再次打开。</li></ol><ol v-else><li>下载完成后打开 APK。</li><li>按系统提示，仅允许浏览器本次安装应用。</li><li>安装完成后可关闭该来源权限。</li></ol></details>
-              <RouterLink v-if="isAdHoc" class="secondary-action" to="/udid">获取设备 UDID</RouterLink>
+              <RouterLink v-if="isAdHoc || isDevelopment" class="secondary-action" to="/udid">获取设备 UDID</RouterLink>
             </template>
           </section>
           <QrPass v-if="!needsPassword" :value="pageUrl" :platform="app.platform" />

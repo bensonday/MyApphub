@@ -94,23 +94,43 @@ func TestCommandTreeAndVersion(t *testing.T) {
 	}
 }
 
-func TestServerDefaultsToPublicURL(t *testing.T) {
+func TestLegacyPublicURLDoesNotOverrideProduction(t *testing.T) {
 	t.Setenv("APPHUB_SERVER", "")
 	t.Setenv("APPHUB_PUBLIC_URL", "http://127.0.0.1:8787")
 	root := NewRoot(Dependencies{Out: io.Discard, Err: io.Discard})
 	value, err := root.PersistentFlags().GetString("server")
-	if err != nil || value != "http://127.0.0.1:8787" {
-		t.Fatalf("server fallback = %q, %v", value, err)
+	if err != nil || value != defaultServerURL {
+		t.Fatalf("server default = %q, %v", value, err)
 	}
 }
 
-func TestServerDefaultsToLocalHub(t *testing.T) {
+func TestServerDefaultsToProduction(t *testing.T) {
 	t.Setenv("APPHUB_SERVER", "")
 	t.Setenv("APPHUB_PUBLIC_URL", "")
 	root := NewRoot(Dependencies{Out: io.Discard, Err: io.Discard})
 	value, err := root.PersistentFlags().GetString("server")
+	if err != nil || value != defaultServerURL {
+		t.Fatalf("production server default = %q, %v", value, err)
+	}
+}
+
+func TestServerEnvironmentOverride(t *testing.T) {
+	t.Setenv("APPHUB_SERVER", "http://127.0.0.1:8787")
+	root := NewRoot(Dependencies{Out: io.Discard, Err: io.Discard})
+	value, err := root.PersistentFlags().GetString("server")
 	if err != nil || value != "http://127.0.0.1:8787" {
-		t.Fatalf("local server default = %q, %v", value, err)
+		t.Fatalf("server override = %q, %v", value, err)
+	}
+}
+
+func TestHelpDoesNotExposeEnvironmentToken(t *testing.T) {
+	secret := strings.Repeat("s", 40)
+	t.Setenv("APPHUB_TOKEN", secret)
+	var output bytes.Buffer
+	root := NewRoot(Dependencies{Out: &output, Err: io.Discard})
+	root.SetArgs([]string{"--help"})
+	if err := root.Execute(); err != nil || strings.Contains(output.String(), secret) {
+		t.Fatalf("help exposed management token: %v", err)
 	}
 }
 

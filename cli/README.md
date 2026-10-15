@@ -1,6 +1,6 @@
 # MyApphub CLI
 
-基于 Cobra 的独立命令行项目。CLI 在开发机本地解析、验证 IPA/APK，生成版本元数据，然后通过 HTTP API 上传到 App Hub 服务端。
+基于 Cobra 的独立命令行项目。CLI 在开发机本地解析、验证 IPA/APK，生成版本元数据，然后通过 TypeScript Worker API 分块上传到 Cloudflare R2。版本管理以 `/admin` 页面为主；现有管理子命令仍可使用。
 
 ## 环境要求
 
@@ -11,7 +11,7 @@
 
 ## 本地运行
 
-先按 [服务端 README](../server/README.md) 启动本地服务，然后在另一个终端执行：
+先按 [项目 README](../README.md) 启动本地 Worker，然后在另一个终端执行：
 
 ```bash
 cd cli
@@ -72,17 +72,19 @@ go test ./internal/packageinfo -run Test -v
 
 ## 连接配置
 
-建议通过环境变量配置服务端地址和管理 Token：
+默认上传地址为当前线上 Worker `https://apphub.bensonday.cc`。仓库内构建的 `cli/bin/apphub` 会自动读取根目录 `.secrets/production-admin-token` 作为线上管理令牌；需要本地联调或切换部署环境时，通过环境变量或 `--server` 指定地址并提供对应令牌：
+
+本机当前部署的线上管理令牌保存在仓库根目录 `.secrets/production-admin-token`，该文件不纳入 Git。连接默认线上地址时，CLI 优先读取此文件，即使终端还留有本地测试用的 `APPHUB_TOKEN`；显式 `--token` 始终优先。若将 CLI 复制到其他位置，需要通过 `APPHUB_TOKEN` 或 `--token` 提供令牌。
 
 ```bash
-export APPHUB_SERVER=https://hub.example.com
+export APPHUB_SERVER=https://apphub.bensonday.cc
 export APPHUB_TOKEN='与服务端一致且不少于32字节的管理Token'
 ```
 
 | 环境变量 | 必填 | 说明 |
 | --- | --- | --- |
-| `APPHUB_SERVER` | 否 | App Hub 服务端地址；未设置时复用 `APPHUB_PUBLIC_URL`，两者都没有时使用 `http://127.0.0.1:8787`。远程地址必须使用 HTTPS。 |
-| `APPHUB_TOKEN` | 是 | 管理 Token，至少 32 字节。 |
+| `APPHUB_SERVER` | 否 | App Hub 服务端地址；未设置时使用 `https://apphub.bensonday.cc`。本地联调可设为 `http://127.0.0.1:8787`。旧变量 `APPHUB_PUBLIC_URL` 不再影响 CLI。 |
+| `APPHUB_TOKEN` | 视情况 | 管理 Token，至少 32 字节。仓库内 CLI 连接默认线上地址且本地保存有 `.secrets/production-admin-token` 时无需设置。 |
 | `APPHUB_SHARE_PASSWORD` | 否 | 执行 `password` 时使用的应用分享密码，适用于无人值守脚本。 |
 | `ANDROID_SDK_ROOT` | APK | Android SDK 路径。 |
 | `ANDROID_HOME` | APK | `ANDROID_SDK_ROOT` 未设置时的备用 Android SDK 路径。 |
@@ -92,7 +94,7 @@ export APPHUB_TOKEN='与服务端一致且不少于32字节的管理Token'
 全局参数可以写在子命令之前或之后：
 
 ```text
---server string       覆盖 APPHUB_SERVER 或 APPHUB_PUBLIC_URL
+--server string       覆盖 APPHUB_SERVER 或默认线上地址
 --token string        覆盖 APPHUB_TOKEN
 --timeout duration    单次请求超时，默认 30m
 --json                输出机器可读 JSON
@@ -129,14 +131,16 @@ apphub help         查看帮助
 apphub upload <file.ipa|file.apk> [flags]
 ```
 
-上传前会在本机完成以下工作：
+上传前会在本机完成以下工作，之后按 8 MiB 分块上传，每块校验 SHA-256，完成后由 Worker 将 R2 对象与 D1 元数据关联：
 
 - 确认文件是安全、有效的 ZIP 格式 IPA/APK。
 - 拒绝绝对路径、目录穿越、符号链接、超过 100,000 个条目或解压后超过 4 GB 的包。
-- IPA：校验代码签名，读取 `Info.plist` 和 `embedded.mobileprovision`，只接受 Enterprise 或 Ad Hoc 分发包。
+- IPA：校验代码签名，读取 `Info.plist` 和 `embedded.mobileprovision`，接受 Enterprise、Ad Hoc，以及包含已注册设备的 Development 测试包。
 - APK：使用 `apksigner` 校验签名，使用 `apkanalyzer` 读取包名、版本和最低 SDK。
 - 计算文件大小和 SHA-256。
-- 尝试从安装包提取图标；也可以通过 `--icon` 覆盖。
+- 从安装包提取图标：只在 `.app` 根目录里按 `Info.plist` 声明的主图标名（`CFBundleIcons`）挑选，取像素最大的非 iPad 版本；Android 取 `res/mipmap*` 中最大的启动器图标，跳过自适应图标的 foreground/background 层。Apple 优化过的 `CgBI` PNG 与 WebP 会先用 macOS `sips` 转成标准 PNG，避免浏览器显示异常。也可以通过 `--icon` 直接指定图片覆盖。
+
+  同一个安装包已经上传过时，命令返回 `文件已存在`；此时仍会把本次提取到的图标推送到线上，所以修正图标不需要改包重传。
 
 参数：
 
@@ -145,7 +149,7 @@ apphub upload <file.ipa|file.apk> [flags]
 | `--notes string` | 直接填写版本说明。 |
 | `--notes-file path` | 从 UTF-8 文本文件读取版本说明，不能和 `--notes` 同时使用。 |
 | `--name string` | 覆盖从安装包读取的应用名称。 |
-| `--icon path` | 使用指定 PNG/JPEG 图标。 |
+| `--icon path` | 使用指定 PNG/JPEG/WebP 图标。 |
 | `--slug string` | 指定产品 URL Slug。iOS 与 Android 使用相同值会进入同一分享页；也可把已有平台重新归入该 Slug。 |
 | `--no-promote` | 只上传版本，不将其设为当前安装版本。默认上传成功后立即设为当前版本。 |
 
@@ -160,6 +164,8 @@ apphub upload <file.ipa|file.apk> [flags]
 ```
 
 如果服务端已存在 SHA-256 完全相同的文件，命令返回已有版本，不会重复保存。如果版本号和构建号相同但文件内容不同，服务端会拒绝上传。
+
+Development 包只能在描述文件列出的设备上运行，设备还需启用开发者模式。安装页提供网页安装入口和 IPA 下载入口；如网页安装失败，请使用 Xcode 或 Apple Configurator 安装 IPA。App Store 签名包仍不接受。
 
 ## `list`：查询应用和版本
 

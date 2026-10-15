@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 )
 
 const Version = "1.0.0"
+const defaultServerURL = "https://apphub.bensonday.cc"
 
 type API interface {
 	List(context.Context) ([]model.PublicApp, error)
@@ -75,18 +77,15 @@ func NewRoot(deps Dependencies) *cobra.Command {
 	}
 	server := os.Getenv("APPHUB_SERVER")
 	if server == "" {
-		server = os.Getenv("APPHUB_PUBLIC_URL")
+		server = defaultServerURL
 	}
-	if server == "" {
-		server = "http://127.0.0.1:8787"
-	}
-	app := &application{deps: deps, server: server, token: os.Getenv("APPHUB_TOKEN"), timeout: 30 * time.Minute}
+	app := &application{deps: deps, server: server, timeout: 30 * time.Minute}
 	root := &cobra.Command{Use: "apphub", Short: "MyApphub command line client", SilenceErrors: true, SilenceUsage: true}
 	root.SetOut(deps.Out)
 	root.SetErr(deps.Err)
 	root.SetIn(deps.In)
-	root.PersistentFlags().StringVar(&app.server, "server", app.server, "App Hub server URL (APPHUB_SERVER or APPHUB_PUBLIC_URL)")
-	root.PersistentFlags().StringVar(&app.token, "token", app.token, "management token (prefer APPHUB_TOKEN)")
+	root.PersistentFlags().StringVar(&app.server, "server", app.server, "App Hub server URL (APPHUB_SERVER)")
+	root.PersistentFlags().StringVar(&app.token, "token", "", "management token (prefer APPHUB_TOKEN)")
 	root.PersistentFlags().DurationVar(&app.timeout, "timeout", app.timeout, "request timeout")
 	root.PersistentFlags().BoolVar(&app.json, "json", false, "write machine-readable JSON")
 	root.AddCommand(app.uploadCommand(), app.listCommand(), app.infoCommand(), app.promoteCommand(), app.deleteCommand(), app.restoreCommand(), app.passwordCommand(), versionCommand(deps.Out), completionCommand(root))
@@ -97,7 +96,25 @@ func (a *application) api() (API, error) {
 	if a.deps.API != nil {
 		return a.deps.API, nil
 	}
-	return a.deps.NewAPI(a.server, a.token, a.timeout)
+	token := a.token
+	if token == "" {
+		token = a.defaultToken()
+	}
+	return a.deps.NewAPI(a.server, token, a.timeout)
+}
+
+func (a *application) defaultToken() string {
+	if a.server == defaultServerURL {
+		if executable, err := os.Executable(); err == nil {
+			path := filepath.Join(filepath.Dir(executable), "..", "..", ".secrets", "production-admin-token")
+			if data, err := os.ReadFile(path); err == nil {
+				if token := strings.TrimSpace(string(data)); token != "" {
+					return token
+				}
+			}
+		}
+	}
+	return os.Getenv("APPHUB_TOKEN")
 }
 func (a *application) print(value any, text string) error {
 	if a.json {
@@ -143,13 +160,16 @@ func (a *application) uploadCommand() *cobra.Command {
 		message := fmt.Sprintf("上传成功：%s %s (%s)", result.App.Slug, result.Version.VersionName, result.Version.BuildNumber)
 		if result.Duplicate {
 			message = fmt.Sprintf("文件已存在：%s %s (%s)", result.App.Slug, result.Version.VersionName, result.Version.BuildNumber)
+			if result.IconUpdated {
+				message = fmt.Sprintf("文件已存在，已更新图标：%s %s (%s)", result.App.Slug, result.Version.VersionName, result.Version.BuildNumber)
+			}
 		}
 		return a.print(result, message)
 	}}
 	command.Flags().StringVar(&notes, "notes", "", "release notes")
 	command.Flags().StringVar(&notesFile, "notes-file", "", "read release notes from file")
 	command.Flags().StringVar(&name, "name", "", "override app name")
-	command.Flags().StringVar(&icon, "icon", "", "override PNG/JPEG icon")
+	command.Flags().StringVar(&icon, "icon", "", "override PNG/JPEG/WebP icon")
 	command.Flags().StringVar(&slug, "slug", "", "slug for a new app")
 	command.Flags().BoolVar(&noPromote, "no-promote", false, "upload without making this the current version")
 	return command

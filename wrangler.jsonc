@@ -1,0 +1,22 @@
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "myapphub",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-07-17",
+  "routes": [{ "pattern": "apphub.bensonday.cc", "custom_domain": true }],
+  "assets": {
+    "directory": "./web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/download/*", "/manifest/*", "/assets/*", "/healthz"]
+  },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "myapphub", "migrations_dir": "migrations" }
+  ],
+  "r2_buckets": [
+    { "binding": "BUCKET", "bucket_name": "myapphub-packages" }
+  ],
+  "vars": { "APPHUB_PROJECT_NAME": "MyApphub", "APPHUB_CANONICAL_ORIGIN": "https://apphub.bensonday.cc" },
+  "triggers": { "crons": ["*/10 * * * *"] },
+  "observability": { "enabled": true, "traces": { "enabled": true } }
+}

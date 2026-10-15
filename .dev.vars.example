@@ -1,0 +1,6 @@
+APPHUB_TOKEN=replace-with-a-random-value-of-at-least-32-bytes
+APPHUB_HMAC_SECRET=replace-with-a-different-random-value-of-at-least-32-bytes
+# 以下三个值可不填写；配置时写入 PEM 文件内容的 Base64 编码。
+# APPHUB_PROFILE_CERT_B64=
+# APPHUB_PROFILE_KEY_B64=
+# APPHUB_DEVICE_CA_B64=

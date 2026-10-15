@@ -4,7 +4,9 @@ import (
 	"archive/zip"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -203,14 +205,14 @@ func (p *Parser) parseIPA(ctx context.Context, packagePath string, entries []*zi
 	development := p.plutil(ctx, profilePath, "Entitlements.get-task-allow")
 	if allDevices == "true" {
 		distribution = "enterprise"
-	} else if devices != "" && development != "true" {
-		distribution = "ad-hoc"
-	} else if development == "true" {
+	} else if devices != "" && development == "true" {
 		distribution = "development"
+	} else if devices != "" {
+		distribution = "ad-hoc"
 	} else {
 		distribution = "app-store"
 	}
-	if distribution != "enterprise" && distribution != "ad-hoc" {
+	if distribution != "enterprise" && distribution != "ad-hoc" && distribution != "development" {
 		return Result{}, fmt.Errorf("unsupported IPA distribution type: %s", distribution)
 	}
 	result := Result{Metadata: model.UploadMetadata{Platform: model.PlatformIOS, Identifier: identifier, Name: name, VersionName: version, BuildNumber: build, MinimumOSVersion: p.plutil(ctx, infoPath, "MinimumOSVersion"), DistributionType: distribution}}
@@ -219,8 +221,9 @@ func (p *Parser) parseIPA(ctx context.Context, packagePath string, entries []*zi
 		result.Metadata.ProvisioningExpiresAt = parsed
 	}
 	if options.IconPath == "" {
-		result.Icon, result.Metadata.IconMIME = findIPAIcon(entries)
+		result.Icon, result.Metadata.IconMIME = findIPAIcon(entries, p.primaryIconNames(ctx, infoPath))
 	}
+	result.Icon, result.Metadata.IconMIME = p.normalizeIcon(ctx, result.Icon, result.Metadata.IconMIME)
 	return result, nil
 }
 
@@ -260,6 +263,7 @@ func (p *Parser) parseAPK(ctx context.Context, packagePath string, entries []*zi
 	if options.IconPath == "" {
 		result.Icon, result.Metadata.IconMIME = findAPKIcon(entries)
 	}
+	result.Icon, result.Metadata.IconMIME = p.normalizeIcon(ctx, result.Icon, result.Metadata.IconMIME)
 	return result, nil
 }
 
@@ -329,43 +333,221 @@ func extractZip(entries []*zip.File, target string) error {
 	}
 	return nil
 }
-func findIPAIcon(entries []*zip.File) ([]byte, string) {
-	candidates := filterIcons(entries, func(name string) bool {
-		return strings.Contains(name, ".app/") && strings.HasSuffix(strings.ToLower(name), ".png") && (strings.Contains(strings.ToLower(name), "appicon") || strings.Contains(strings.ToLower(name), "icon"))
-	})
-	return readZipIcon(candidates)
+
+/*
+ * App icons live in the root of the top level .app bundle. Frameworks, plug-ins, Watch apps and Flutter
+ * asset bundles also ship PNGs whose names contain "icon", and the previous descending-name sort picked
+ * one of those, publishing artwork unrelated to the app icon.
+ */
+func findIPAIcon(entries []*zip.File, preferred []string) ([]byte, string) {
+	return selectIcon(iconCandidates(entries, isAppBundleRootIcon), preferred)
 }
 func findAPKIcon(entries []*zip.File) ([]byte, string) {
-	candidates := filterIcons(entries, func(name string) bool {
-		lower := strings.ToLower(name)
-		return strings.HasPrefix(lower, "res/mipmap") && strings.HasSuffix(lower, ".png") && (strings.Contains(lower, "launcher") || strings.Contains(lower, "icon"))
-	})
-	return readZipIcon(candidates)
+	return selectIcon(iconCandidates(entries, isAPKLauncherIcon), nil)
 }
-func filterIcons(entries []*zip.File, predicate func(string) bool) []*zip.File {
-	result := make([]*zip.File, 0)
+func isAppBundleRootIcon(name string) bool {
+	parts := strings.Split(filepath.ToSlash(name), "/")
+	if len(parts) != 3 || !strings.EqualFold(parts[0], "Payload") || !strings.HasSuffix(strings.ToLower(parts[1]), ".app") {
+		return false
+	}
+	lower := strings.ToLower(parts[2])
+	if !strings.Contains(lower, "appicon") && !strings.Contains(lower, "icon") {
+		return false
+	}
+	return strings.HasSuffix(lower, ".png") || strings.HasSuffix(lower, ".webp")
+}
+func isAPKLauncherIcon(name string) bool {
+	lower := strings.ToLower(filepath.ToSlash(name))
+	if !strings.HasPrefix(lower, "res/mipmap") || (!strings.HasSuffix(lower, ".png") && !strings.HasSuffix(lower, ".webp")) {
+		return false
+	}
+	if !strings.Contains(lower, "launcher") && !strings.Contains(lower, "icon") {
+		return false
+	}
+	// Adaptive icon layers carry only part of the artwork; a foreground layer alone has no background.
+	base := strings.ToLower(filepath.Base(lower))
+	return !strings.Contains(base, "foreground") && !strings.Contains(base, "background")
+}
+func iconCandidates(entries []*zip.File, predicate func(string) bool) []*zip.File {
+	result := make([]*zip.File, 0, 8)
 	for _, file := range entries {
 		if predicate(file.Name) && file.UncompressedSize64 <= 2<<20 {
 			result = append(result, file)
 		}
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Name > result[j].Name })
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	if len(result) > 40 {
+		result = result[:40]
+	}
 	return result
 }
-func readZipIcon(candidates []*zip.File) ([]byte, string) {
-	if len(candidates) == 0 {
-		return nil, ""
+func imageFormat(data []byte) string {
+	if len(data) >= 8 && string(data[:8]) == "\x89PNG\r\n\x1a\n" {
+		return "image/png"
 	}
-	input, err := candidates[0].Open()
+	if len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
+		return "image/webp"
+	}
+	if len(data) >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff {
+		return "image/jpeg"
+	}
+	return ""
+}
+func imageDimensions(data []byte, format string) (int, int) {
+	switch format {
+	case "image/png":
+		// Walk the chunks: Xcode's CgBI variants insert a chunk before IHDR.
+		for offset := 8; offset+8 <= len(data); {
+			length := int(binary.BigEndian.Uint32(data[offset : offset+4]))
+			if string(data[offset+4:offset+8]) == "IHDR" && offset+16 <= len(data) {
+				return int(binary.BigEndian.Uint32(data[offset+8 : offset+12])), int(binary.BigEndian.Uint32(data[offset+12 : offset+16]))
+			}
+			offset += 12 + length
+		}
+		return 0, 0
+	case "image/webp":
+		if len(data) < 30 {
+			return 0, 0
+		}
+		switch string(data[12:16]) {
+		case "VP8X":
+			return 1 + int(data[24]) + int(data[25])<<8 + int(data[26])<<16, 1 + int(data[27]) + int(data[28])<<8 + int(data[29])<<16
+		case "VP8 ":
+			return int(binary.LittleEndian.Uint16(data[26:28]) & 0x3fff), int(binary.LittleEndian.Uint16(data[28:30]) & 0x3fff)
+		case "VP8L":
+			bits := binary.LittleEndian.Uint32(data[21:25])
+			return int(bits&0x3fff) + 1, int((bits>>14)&0x3fff) + 1
+		}
+	}
+	return 0, 0
+}
+
+// Xcode rewrites app icon PNGs into Apple's CgBI variant, which browsers cannot decode.
+func isAppleOptimizedPNG(data []byte) bool {
+	return len(data) >= 16 && string(data[:8]) == "\x89PNG\r\n\x1a\n" && string(data[12:16]) == "CgBI"
+}
+
+/*
+ * Icons copied straight out of a package may use formats a browser cannot render (CgBI PNG, WebP).
+ * macOS `sips` decodes both, so store a plain PNG whenever that is possible.
+ */
+func (p *Parser) normalizeIcon(ctx context.Context, icon []byte, mime string) ([]byte, string) {
+	if mime != "image/webp" && !isAppleOptimizedPNG(icon) {
+		return icon, mime
+	}
+	directory, err := os.MkdirTemp("", "apphub-icon-*")
 	if err != nil {
+		return icon, mime
+	}
+	defer os.RemoveAll(directory)
+	source := filepath.Join(directory, "icon."+strings.TrimPrefix(mime, "image/"))
+	target := filepath.Join(directory, "icon.png")
+	if err := os.WriteFile(source, icon, 0o600); err != nil {
+		return icon, mime
+	}
+	if _, err := p.Runner.Run(ctx, "/usr/bin/sips", "-s", "format", "png", source, "--out", target); err != nil {
+		return icon, mime
+	}
+	converted, err := os.ReadFile(target)
+	if err != nil || !validPNG(converted) || isAppleOptimizedPNG(converted) || len(converted) > 2<<20 {
+		return icon, mime
+	}
+	return converted, "image/png"
+}
+
+type iconChoice struct {
+	name      string
+	data      []byte
+	mime      string
+	preferred bool
+	phone     bool
+	round     bool
+	area      int
+	weight    int
+}
+
+func selectIcon(candidates []*zip.File, preferred []string) ([]byte, string) {
+	var best *iconChoice
+	for _, file := range candidates {
+		input, err := file.Open()
+		if err != nil {
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(input, 2<<20))
+		input.Close()
+		if err != nil {
+			continue
+		}
+		format := imageFormat(data)
+		if format == "" {
+			continue
+		}
+		width, height := imageDimensions(data, format)
+		lower := strings.ToLower(file.Name)
+		choice := &iconChoice{name: file.Name, data: data, mime: format, area: width * height, weight: len(data),
+			preferred: iconIsPreferred(file.Name, preferred),
+			phone:     !strings.Contains(lower, "~ipad") && !strings.Contains(lower, "ipad"),
+			round:     strings.Contains(lower, "round")}
+		if best == nil || iconBeats(choice, best) {
+			best = choice
+		}
+	}
+	if best == nil {
 		return nil, ""
 	}
-	defer input.Close()
-	data, err := io.ReadAll(io.LimitReader(input, 2<<20))
-	if err != nil || !validPNG(data) {
-		return nil, ""
+	return best.data, best.mime
+}
+func iconBeats(candidate, best *iconChoice) bool {
+	if candidate.preferred != best.preferred {
+		return candidate.preferred
 	}
-	return data, "image/png"
+	if candidate.phone != best.phone {
+		return candidate.phone
+	}
+	if candidate.round != best.round {
+		return best.round
+	}
+	if candidate.area != best.area {
+		return candidate.area > best.area
+	}
+	if candidate.weight != best.weight {
+		return candidate.weight > best.weight
+	}
+	return candidate.name < best.name
+}
+func iconIsPreferred(name string, preferred []string) bool {
+	base := strings.ToLower(filepath.Base(name))
+	trimmed := strings.TrimSuffix(strings.TrimSuffix(base, ".png"), ".webp")
+	trimmed = strings.TrimSuffix(strings.TrimSuffix(trimmed, "@2x"), "@3x")
+	switch trimmed {
+	case "ic_launcher", "launcher", "icon", "app_icon":
+		return true
+	}
+	for _, value := range preferred {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value != "" && strings.HasPrefix(trimmed, value) {
+			return true
+		}
+	}
+	return false
+}
+func (p *Parser) primaryIconNames(ctx context.Context, infoPath string) []string {
+	names := make([]string, 0, 6)
+	for _, key := range []string{"CFBundleIcons.CFBundlePrimaryIcon.CFBundleIconFiles", "CFBundleIcons~ipad.CFBundlePrimaryIcon.CFBundleIconFiles", "CFBundleIconFiles"} {
+		raw := p.plutilJSON(ctx, infoPath, key)
+		if raw == "" {
+			continue
+		}
+		var values []string
+		if err := json.Unmarshal([]byte(raw), &values); err != nil {
+			continue
+		}
+		names = append(names, values...)
+	}
+	if name := p.plutil(ctx, infoPath, "CFBundleIconName"); name != "" {
+		names = append(names, name)
+	}
+	return names
 }
 func readIcon(path string) ([]byte, string, error) {
 	data, err := os.ReadFile(path)
@@ -375,13 +557,10 @@ func readIcon(path string) ([]byte, string, error) {
 	if len(data) > 2<<20 {
 		return nil, "", errors.New("icon exceeds 2 MB")
 	}
-	if validPNG(data) {
-		return data, "image/png", nil
+	if format := imageFormat(data); format != "" {
+		return data, format, nil
 	}
-	if len(data) >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff {
-		return data, "image/jpeg", nil
-	}
-	return nil, "", errors.New("icon must be PNG or JPEG")
+	return nil, "", errors.New("icon must be PNG, JPEG or WebP")
 }
 func validPNG(data []byte) bool { return len(data) >= 8 && string(data[:8]) == "\x89PNG\r\n\x1a\n" }
 func first(values ...string) string {

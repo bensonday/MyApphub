@@ -3,15 +3,14 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"strings"
 	"time"
 
@@ -61,51 +60,114 @@ func (c *Client) Upload(ctx context.Context, packagePath string, metadata model.
 		return model.UploadResult{}, err
 	}
 	defer file.Close()
-	pipeReader, pipeWriter := io.Pipe()
-	writer := multipart.NewWriter(pipeWriter)
-	go func() {
-		defer pipeWriter.Close()
-		metadataPart, partErr := writer.CreateFormField("metadata")
-		if partErr == nil {
-			partErr = json.NewEncoder(metadataPart).Encode(metadata)
-		}
-		if partErr == nil && len(icon) > 0 {
-			var iconPart io.Writer
-			iconPart, partErr = writer.CreateFormFile("icon", "icon")
-			if partErr == nil {
-				_, partErr = iconPart.Write(icon)
+	var started struct {
+		ID        string          `json:"id"`
+		PartSize  int             `json:"partSize"`
+		Duplicate bool            `json:"duplicate"`
+		App       model.PublicApp `json:"app"`
+		Version   model.Version   `json:"version"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/uploads", metadata, &started); err != nil {
+		return model.UploadResult{}, err
+	}
+	if started.Duplicate {
+		/*
+		 * The package itself is already stored, but the icon may have been extracted wrongly by an older
+		 * build, so a corrected icon is still pushed to the existing app.
+		 */
+		iconUpdated := false
+		if len(icon) > 0 && started.App.Slug != "" {
+			iconPath := fmt.Sprintf("/api/v1/apps/%s/%s/icon", url.PathEscape(started.App.Slug), url.PathEscape(string(metadata.Platform)))
+			if err := c.putBytes(ctx, iconPath, icon, ""); err != nil {
+				return model.UploadResult{}, err
 			}
+			iconUpdated = true
 		}
-		if partErr == nil {
-			var packagePart io.Writer
-			packagePart, partErr = writer.CreateFormFile("package", "package"+path.Ext(packagePath))
-			if partErr == nil {
-				_, partErr = io.Copy(packagePart, &progressReader{reader: file, total: metadata.FileSize, output: progress})
-			}
-		}
-		if closeErr := writer.Close(); partErr == nil {
-			partErr = closeErr
-		}
-		if partErr != nil {
-			_ = pipeWriter.CloseWithError(partErr)
+		return model.UploadResult{App: started.App, Version: started.Version, Duplicate: true, IconUpdated: iconUpdated}, nil
+	}
+	if started.ID == "" || started.PartSize < 5<<20 || started.PartSize > 32<<20 {
+		return model.UploadResult{}, errors.New("server returned an invalid upload session")
+	}
+	uploadPath := "/api/v1/uploads/" + url.PathEscape(started.ID)
+	completed := false
+	defer func() {
+		if !completed {
+			cancelCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			_ = c.doJSON(cancelCtx, http.MethodDelete, uploadPath, nil, &map[string]any{})
 		}
 	}()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/v1/packages", pipeReader)
-	if err != nil {
+	if len(icon) > 0 {
+		if err := c.putBytes(ctx, uploadPath+"/icon", icon, ""); err != nil {
+			return model.UploadResult{}, err
+		}
+	}
+	buffer := make([]byte, started.PartSize)
+	type uploadedPart struct {
+		PartNumber int    `json:"partNumber"`
+		ETag       string `json:"etag"`
+	}
+	parts := make([]uploadedPart, 0, (metadata.FileSize+int64(started.PartSize)-1)/int64(started.PartSize))
+	var sent int64
+	for number := 1; ; number++ {
+		count, readErr := io.ReadFull(file, buffer)
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil && readErr != io.ErrUnexpectedEOF {
+			return model.UploadResult{}, readErr
+		}
+		digest := sha256.Sum256(buffer[:count])
+		var part uploadedPart
+		if err := c.putBytesResult(ctx, fmt.Sprintf("%s/parts/%d", uploadPath, number), buffer[:count], fmt.Sprintf("%x", digest), &part); err != nil {
+			return model.UploadResult{}, err
+		}
+		if part.PartNumber != number || part.ETag == "" {
+			return model.UploadResult{}, errors.New("server returned an invalid upload part")
+		}
+		parts = append(parts, part)
+		sent += int64(count)
+		if progress != nil {
+			_, _ = fmt.Fprintf(progress, "\r上传进度 %.1f%%", 100*float64(sent)/float64(metadata.FileSize))
+		}
+		if readErr == io.ErrUnexpectedEOF {
+			break
+		}
+	}
+	if sent != metadata.FileSize {
+		return model.UploadResult{}, errors.New("package size changed during upload")
+	}
+	if progress != nil {
+		_, _ = fmt.Fprintln(progress)
+	}
+	var result model.UploadResult
+	if err := c.doJSON(ctx, http.MethodPost, uploadPath+"/complete", map[string]any{"parts": parts}, &result); err != nil {
 		return model.UploadResult{}, err
 	}
-	request.Header.Set("Content-Type", writer.FormDataContentType())
+	completed = true
+	return result, nil
+}
+
+func (c *Client) putBytes(ctx context.Context, requestPath string, data []byte, checksum string) error {
+	return c.putBytesResult(ctx, requestPath, data, checksum, &map[string]any{})
+}
+
+func (c *Client) putBytesResult(ctx context.Context, requestPath string, data []byte, checksum string, target any) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, c.BaseURL+requestPath, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
 	c.authorize(request)
+	request.Header.Set("Content-Type", "application/octet-stream")
+	if checksum != "" {
+		request.Header.Set("X-Part-SHA256", checksum)
+	}
 	response, err := c.HTTP.Do(request)
 	if err != nil {
-		return model.UploadResult{}, err
+		return err
 	}
 	defer response.Body.Close()
-	var result model.UploadResult
-	if err := decodeResponse(response, &result); err != nil {
-		return model.UploadResult{}, err
-	}
-	return result, nil
+	return decodeResponse(response, target)
 }
 
 func (c *Client) Promote(ctx context.Context, slug, version string) (model.PublicApp, error) {
@@ -182,29 +244,6 @@ func decodeAPIError(response *http.Response) error {
 		value.Message = response.Status
 	}
 	return &APIError{Status: response.StatusCode, Code: value.Code, Message: value.Message}
-}
-
-type progressReader struct {
-	reader      io.Reader
-	total, read int64
-	output      io.Writer
-	last        int
-}
-
-func (r *progressReader) Read(buffer []byte) (int, error) {
-	n, err := r.reader.Read(buffer)
-	r.read += int64(n)
-	if r.output != nil && r.total > 0 {
-		percent := int(r.read * 100 / r.total)
-		if percent != r.last {
-			_, _ = fmt.Fprintf(r.output, "\r上传 %d%%", percent)
-			r.last = percent
-			if percent == 100 {
-				_, _ = fmt.Fprintln(r.output)
-			}
-		}
-	}
-	return n, err
 }
 
 func decodeResponse(response *http.Response, target any) error {
