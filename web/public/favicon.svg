@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="MyAppHub">
+  <defs>
+    <radialGradient id="background" cx="30%" cy="108%" r="125%">
+      <stop offset="0" stop-color="#ffd76a"/>
+      <stop offset=".32" stop-color="#f77737"/>
+      <stop offset=".55" stop-color="#e1306c"/>
+      <stop offset=".7" stop-color="#c13584"/>
+      <stop offset=".84" stop-color="#833ab4"/>
+      <stop offset="1" stop-color="#405de6"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="256" height="256" rx="58" fill="url(#background)"/>
+
+  <g fill="#fff">
+    <path d="M116 45c7-4 17-4 24 0l58 35c13 8 13 21 0 29l-58 33c-7 4-17 4-24 0l-58-33c-13-8-13-21 0-29z"/>
+    <path d="M52 128c-6 4-6 11 1 15l62 36c8 5 18 5 26 0l62-36c7-4 7-11 1-15-4-3-8-2-12 0l-53 32c-7 4-15 4-22 0l-53-32c-4-2-8-3-12 0z"/>
+    <path d="M52 164c-6 4-6 11 1 15l62 36c8 5 18 5 26 0l62-36c7-4 7-11 1-15-4-3-8-2-12 0l-53 32c-7 4-15 4-22 0l-53-32c-4-2-8-3-12 0z"/>
+  </g>
+</svg>
