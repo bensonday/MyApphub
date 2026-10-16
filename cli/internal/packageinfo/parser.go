@@ -228,7 +228,7 @@ func (p *Parser) parseIPA(ctx context.Context, packagePath string, entries []*zi
 }
 
 func (p *Parser) parseAPK(ctx context.Context, packagePath string, entries []*zip.File, options Options) (Result, error) {
-	analyzer, signer, err := p.androidTools()
+	analyzer, signer, aapt, err := p.androidTools()
 	if err != nil {
 		return Result{}, err
 	}
@@ -250,9 +250,17 @@ func (p *Parser) parseAPK(ctx context.Context, packagePath string, entries []*zi
 	if identifier == "" || version == "" || build == "" {
 		return Result{}, errors.New("APK manifest is missing required fields")
 	}
+	badgingOutput, badgingErr := p.Runner.Run(ctx, aapt, "dump", "badging", packagePath)
+	badging := parseAPKBadging(badgingOutput)
 	name := options.Name
 	if name == "" {
-		name = identifier[strings.LastIndex(identifier, ".")+1:]
+		name = badging.label
+	}
+	if name == "" {
+		if badgingErr != nil {
+			return Result{}, fmt.Errorf("APK application label could not be read: %w; use --name to override", badgingErr)
+		}
+		return Result{}, errors.New("APK has no readable application label; use --name to override")
 	}
 	certificate := ""
 	match := regexp.MustCompile(`(?i)certificate SHA-256 digest:\s*([a-f0-9]+)`).FindStringSubmatch(string(signature))
@@ -261,7 +269,13 @@ func (p *Parser) parseAPK(ctx context.Context, packagePath string, entries []*zi
 	}
 	result := Result{Metadata: model.UploadMetadata{Platform: model.PlatformAndroid, Identifier: identifier, Name: name, VersionName: version, BuildNumber: build, MinimumOSVersion: minimum, SigningCertificateSHA256: certificate}}
 	if options.IconPath == "" {
-		result.Icon, result.Metadata.IconMIME = findAPKIcon(entries)
+		result.Icon, result.Metadata.IconMIME = findAPKIcon(entries, badging.icons)
+		if len(result.Icon) == 0 {
+			if badgingErr != nil {
+				return Result{}, fmt.Errorf("APK application icon could not be read: %w; use --icon to override", badgingErr)
+			}
+			return Result{}, errors.New("APK has no readable application icon; use --icon with a PNG, JPEG or WebP file")
+		}
 	}
 	result.Icon, result.Metadata.IconMIME = p.normalizeIcon(ctx, result.Icon, result.Metadata.IconMIME)
 	return result, nil
@@ -281,21 +295,26 @@ func (p *Parser) plutilJSON(ctx context.Context, path, key string) string {
 	}
 	return strings.TrimSpace(string(output))
 }
-func (p *Parser) androidTools() (string, string, error) {
+func (p *Parser) androidTools() (string, string, string, error) {
 	sdk := p.AndroidSDK
 	if sdk == "" {
 		sdk = filepath.Join(p.HomeDir, "Library", "Android", "sdk")
 	}
 	analyzer := filepath.Join(sdk, "cmdline-tools", "latest", "bin", "apkanalyzer")
 	builds, _ := filepath.Glob(filepath.Join(sdk, "build-tools", "*", "apksigner"))
+	aapts, _ := filepath.Glob(filepath.Join(sdk, "build-tools", "*", "aapt"))
 	sort.Sort(sort.Reverse(sort.StringSlice(builds)))
+	sort.Sort(sort.Reverse(sort.StringSlice(aapts)))
 	if _, err := os.Stat(analyzer); err != nil {
-		return "", "", fmt.Errorf("apkanalyzer not found under %s", sdk)
+		return "", "", "", fmt.Errorf("apkanalyzer not found under %s", sdk)
 	}
 	if len(builds) == 0 {
-		return "", "", fmt.Errorf("apksigner not found under %s", sdk)
+		return "", "", "", fmt.Errorf("apksigner not found under %s", sdk)
 	}
-	return analyzer, builds[0], nil
+	if len(aapts) == 0 {
+		return "", "", "", fmt.Errorf("aapt not found under %s", sdk)
+	}
+	return analyzer, builds[0], aapts[0], nil
 }
 
 func extractZip(entries []*zip.File, target string) error {
@@ -342,8 +361,57 @@ func extractZip(entries []*zip.File, target string) error {
 func findIPAIcon(entries []*zip.File, preferred []string) ([]byte, string) {
 	return selectIcon(iconCandidates(entries, isAppBundleRootIcon), preferred)
 }
-func findAPKIcon(entries []*zip.File) ([]byte, string) {
-	return selectIcon(iconCandidates(entries, isAPKLauncherIcon), nil)
+func findAPKIcon(entries []*zip.File, declaredPaths []string) ([]byte, string) {
+	paths := make(map[string]bool, len(declaredPaths))
+	preferred := make([]string, 0, len(declaredPaths))
+	for _, path := range declaredPaths {
+		paths[path] = true
+		preferred = append(preferred, strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
+	}
+	return selectIcon(iconCandidates(entries, func(name string) bool { return paths[name] }), preferred)
+}
+
+type apkBadging struct {
+	label string
+	icons []string
+}
+
+var applicationBadging = regexp.MustCompile(`^application: label='(.*)' icon='(.*)'$`)
+
+func parseAPKBadging(output []byte) apkBadging {
+	var result apkBadging
+	for _, line := range strings.Split(string(output), "\n") {
+		line = strings.TrimSpace(line)
+		if value, ok := badgingQuotedValue(line, "application-label:"); ok {
+			result.label = value
+			continue
+		}
+		if strings.HasPrefix(line, "application-icon-") {
+			if colon := strings.IndexByte(line, ':'); colon >= 0 {
+				if value, ok := badgingQuotedValue(line[colon:], ":"); ok {
+					result.icons = append(result.icons, value)
+				}
+			}
+			continue
+		}
+		if match := applicationBadging.FindStringSubmatch(line); len(match) == 3 {
+			if result.label == "" {
+				result.label = match[1]
+			}
+			if match[2] != "" {
+				result.icons = append(result.icons, match[2])
+			}
+		}
+	}
+	return result
+}
+
+func badgingQuotedValue(line, prefix string) (string, bool) {
+	value, ok := strings.CutPrefix(line, prefix)
+	if !ok || len(value) < 2 || value[0] != '\'' || value[len(value)-1] != '\'' {
+		return "", false
+	}
+	return value[1 : len(value)-1], true
 }
 func isAppBundleRootIcon(name string) bool {
 	parts := strings.Split(filepath.ToSlash(name), "/")
@@ -355,18 +423,6 @@ func isAppBundleRootIcon(name string) bool {
 		return false
 	}
 	return strings.HasSuffix(lower, ".png") || strings.HasSuffix(lower, ".webp")
-}
-func isAPKLauncherIcon(name string) bool {
-	lower := strings.ToLower(filepath.ToSlash(name))
-	if !strings.HasPrefix(lower, "res/mipmap") || (!strings.HasSuffix(lower, ".png") && !strings.HasSuffix(lower, ".webp")) {
-		return false
-	}
-	if !strings.Contains(lower, "launcher") && !strings.Contains(lower, "icon") {
-		return false
-	}
-	// Adaptive icon layers carry only part of the artwork; a foreground layer alone has no background.
-	base := strings.ToLower(filepath.Base(lower))
-	return !strings.Contains(base, "foreground") && !strings.Contains(base, "background")
 }
 func iconCandidates(entries []*zip.File, predicate func(string) bool) []*zip.File {
 	result := make([]*zip.File, 0, 8)

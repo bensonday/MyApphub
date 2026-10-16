@@ -146,7 +146,7 @@ func TestFindAPKIconSkipsAdaptiveLayersAndPrefersLargestLauncher(t *testing.T) {
 		"res/mipmap-xxxhdpi/ic_launcher_foreground.png": pngWithSize(432, 432),
 		"res/mipmap-xxxhdpi/ic_launcher_background.png": pngWithSize(432, 432),
 	})
-	icon, mime := findAPKIcon(zipEntries(t, path))
+	icon, mime := findAPKIcon(zipEntries(t, path), []string{"res/mipmap-mdpi/ic_launcher.png", "res/mipmap-xxxhdpi/ic_launcher.png"})
 	if mime != "image/png" || string(icon) != string(launcher) {
 		t.Fatal("expected the largest plain launcher icon")
 	}
@@ -155,7 +155,7 @@ func TestFindAPKIconSkipsAdaptiveLayersAndPrefersLargestLauncher(t *testing.T) {
 func TestFindAPKIconAcceptsWebPLauncher(t *testing.T) {
 	icon, mime := findAPKIcon(zipEntries(t, makeZIP(t, ".zip", map[string][]byte{
 		"res/mipmap-xxhdpi/ic_launcher.webp": webpWithSize(144, 144),
-	})))
+	})), []string{"res/mipmap-xxhdpi/ic_launcher.webp"})
 	if mime != "image/webp" || len(icon) == 0 {
 		t.Fatalf("expected a WebP launcher icon, got %d bytes of %s", len(icon), mime)
 	}
@@ -192,7 +192,8 @@ func TestParseAPK(t *testing.T) {
 	sdk := t.TempDir()
 	analyzer := filepath.Join(sdk, "cmdline-tools", "latest", "bin", "apkanalyzer")
 	signer := filepath.Join(sdk, "build-tools", "36.0.0", "apksigner")
-	for _, path := range []string{analyzer, signer} {
+	aapt := filepath.Join(sdk, "build-tools", "36.0.0", "aapt")
+	for _, path := range []string{analyzer, signer, aapt} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -200,28 +201,48 @@ func TestParseAPK(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	badgingText := "application-label:'EnglishGO'\napplication-icon-160:'res/9w.png'\napplication-icon-640:'res/o-.png'\napplication: label='EnglishGO' icon='res/9w.png'\n"
 	runner := fakeRunner{run: func(name string, args ...string) ([]byte, error) {
 		if strings.HasSuffix(name, "apksigner") {
 			return []byte("Verifies\nSigner #1 certificate SHA-256 digest: AABBCCDD\n"), nil
 		}
 		key := strings.Join(args[:len(args)-1], " ")
+		if key == "dump badging" {
+			return []byte(badgingText), nil
+		}
 		values := map[string]string{"manifest application-id": "com.example.demo", "manifest version-name": "1.2.3", "manifest version-code": "12", "manifest min-sdk": "24"}
 		if value, ok := values[key]; ok {
 			return []byte(value), nil
 		}
 		return nil, fmt.Errorf("unexpected command: %s", key)
 	}}
-	path := makeZIP(t, ".apk", map[string][]byte{"AndroidManifest.xml": {1, 2, 3}, "res/mipmap-xxxhdpi/ic_launcher.png": png()})
+	preferred := pngWithSize(192, 192)
+	path := makeZIP(t, ".apk", map[string][]byte{"AndroidManifest.xml": {1, 2, 3}, "res/9w.png": pngWithSize(48, 48), "res/o-.png": preferred, "res/mipmap-xxxhdpi/unrelated_icon.png": pngWithSize(256, 256)})
 	parser := &Parser{Runner: runner, AndroidSDK: sdk}
 	result, err := parser.Parse(context.Background(), path, Options{Promote: true, ReleaseNotes: "notes"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Metadata.Identifier != "com.example.demo" || result.Metadata.VersionName != "1.2.3" || result.Metadata.SigningCertificateSHA256 != "aabbccdd" || result.Metadata.SHA256 == "" || !result.Metadata.Promote {
+	if result.Metadata.Identifier != "com.example.demo" || result.Metadata.Name != "EnglishGO" || result.Metadata.VersionName != "1.2.3" || result.Metadata.SigningCertificateSHA256 != "aabbccdd" || result.Metadata.SHA256 == "" || !result.Metadata.Promote {
 		t.Fatalf("unexpected metadata: %+v", result.Metadata)
 	}
-	if string(result.Icon[:8]) != "\x89PNG\r\n\x1a\n" || result.Metadata.IconMIME != "image/png" {
+	if string(result.Icon) != string(preferred) || result.Metadata.IconMIME != "image/png" {
 		t.Fatal("APK icon was not extracted")
+	}
+	badgingText = "application-label:'EnglishGO'\napplication-icon-640:'res/missing.png'\n"
+	if _, err := parser.Parse(context.Background(), path, Options{}); err == nil || !strings.Contains(err.Error(), "--icon") {
+		t.Fatalf("missing declared icon should require an override: %v", err)
+	}
+	badgingText = "application-icon-640:'res/o-.png'\n"
+	if _, err := parser.Parse(context.Background(), path, Options{}); err == nil || !strings.Contains(err.Error(), "--name") {
+		t.Fatalf("missing declared label should require an override: %v", err)
+	}
+}
+
+func TestParseAPKBadgingPreservesDeclaredLabelAndIconPaths(t *testing.T) {
+	badging := parseAPKBadging([]byte("application-label:'Teacher's App'\napplication-icon-160:'res/9w.png'\napplication-icon-640:'res/o-.png'\napplication: label='Teacher's App' icon='res/9w.png'\n"))
+	if badging.label != "Teacher's App" || len(badging.icons) != 3 || badging.icons[1] != "res/o-.png" {
+		t.Fatalf("unexpected APK badging: %+v", badging)
 	}
 }
 

@@ -38,7 +38,7 @@ export APPHUB_TOKEN='与 .dev.vars 一致的管理令牌'
 ./bin/apphub upload ./App.ipa
 ```
 
-CLI 在本机使用 macOS `codesign`、`security`、`plutil` 或 Android SDK `apkanalyzer`、`apksigner` 检查包，计算 SHA-256，按 8 MiB 分块上传。详见 [CLI 说明](cli/README.md)。
+CLI 在本机使用 macOS `codesign`、`security`、`plutil` 或 Android SDK `apkanalyzer`、`aapt`、`apksigner` 检查包，计算 SHA-256，按 8 MiB 分块上传。详见 [CLI 说明](cli/README.md)。
 
 线上上传时，仓库内的 `cli/bin/apphub` 默认连接 `https://apphub.bensonday.cc` 并读取 `.secrets/production-admin-token`。旧的 `APPHUB_PUBLIC_URL` 不再影响 CLI；本地联调须显式设置 `APPHUB_SERVER=http://127.0.0.1:8787` 和对应的 `APPHUB_TOKEN`。
 

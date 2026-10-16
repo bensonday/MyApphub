@@ -61,11 +61,12 @@ func (c *Client) Upload(ctx context.Context, packagePath string, metadata model.
 	}
 	defer file.Close()
 	var started struct {
-		ID        string          `json:"id"`
-		PartSize  int             `json:"partSize"`
-		Duplicate bool            `json:"duplicate"`
-		App       model.PublicApp `json:"app"`
-		Version   model.Version   `json:"version"`
+		ID          string          `json:"id"`
+		PartSize    int             `json:"partSize"`
+		Duplicate   bool            `json:"duplicate"`
+		NameUpdated bool            `json:"nameUpdated"`
+		App         model.PublicApp `json:"app"`
+		Version     model.Version   `json:"version"`
 	}
 	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/uploads", metadata, &started); err != nil {
 		return model.UploadResult{}, err
@@ -83,7 +84,7 @@ func (c *Client) Upload(ctx context.Context, packagePath string, metadata model.
 			}
 			iconUpdated = true
 		}
-		return model.UploadResult{App: started.App, Version: started.Version, Duplicate: true, IconUpdated: iconUpdated}, nil
+		return model.UploadResult{App: started.App, Version: started.Version, Duplicate: true, IconUpdated: iconUpdated, NameUpdated: started.NameUpdated}, nil
 	}
 	if started.ID == "" || started.PartSize < 5<<20 || started.PartSize > 32<<20 {
 		return model.UploadResult{}, errors.New("server returned an invalid upload session")

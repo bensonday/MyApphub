@@ -147,7 +147,7 @@ func TestDuplicateUploadRefreshesIcon(t *testing.T) {
 	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		switch request.URL.Path {
 		case "/api/v1/uploads":
-			return response(200, `{"duplicate":true,"app":{"slug":"demo"},"version":{"id":"v1"}}`), nil
+			return response(200, `{"duplicate":true,"nameUpdated":true,"app":{"slug":"demo","name":"Corrected name"},"version":{"id":"v1"}}`), nil
 		case "/api/v1/apps/demo/ios/icon":
 			if request.Method != http.MethodPut {
 				t.Fatalf("icon refresh used %s", request.Method)
@@ -168,7 +168,7 @@ func TestDuplicateUploadRefreshesIcon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Duplicate || !result.IconUpdated || !refreshed {
-		t.Fatalf("stored icon was not refreshed: %+v", result)
+	if !result.Duplicate || !result.IconUpdated || !result.NameUpdated || result.App.Name != "Corrected name" || !refreshed {
+		t.Fatalf("stored metadata was not refreshed: %+v", result)
 	}
 }

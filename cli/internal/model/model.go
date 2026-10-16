@@ -63,4 +63,5 @@ type UploadResult struct {
 	Version     Version   `json:"version"`
 	Duplicate   bool      `json:"duplicate"`
 	IconUpdated bool      `json:"iconUpdated"`
+	NameUpdated bool      `json:"nameUpdated"`
 }

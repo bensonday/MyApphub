@@ -51,7 +51,16 @@ export async function beginUpload(request: Request, env: Env): Promise<Response>
   if (selected && selected.identifier !== metadata.identifier) return fail(409, 'identifier_conflict', 'Slug already belongs to another identifier')
   const versions = (await env.DB.prepare('SELECT * FROM versions WHERE slug = ? AND platform = ?').bind(slug, metadata.platform).all<VersionRow>()).results
   const duplicate = versions.find(version => version.sha256 === metadata.sha256)
-  if (duplicate && existing && selected) return json({ duplicate: true, app: publicApp(existing, selected), version: publicVersion(duplicate) })
+  if (duplicate && existing && selected) {
+    const nameUpdated = existing.name !== metadata.name
+    if (nameUpdated) {
+      existing.updated_at = nowISO()
+      existing.name = metadata.name
+      await env.DB.prepare('UPDATE apps SET name = ?, updated_at = ? WHERE slug = ? AND deleted_at IS NULL')
+        .bind(existing.name, existing.updated_at, slug).run()
+    }
+    return json({ duplicate: true, nameUpdated, app: publicApp(existing, selected), version: publicVersion(duplicate) })
+  }
   if (versions.some(version => version.version_name === metadata.versionName && version.build_number === metadata.buildNumber))
     return fail(409, 'version_conflict', 'Version name and build number already exist')
   metadata.slug = slug

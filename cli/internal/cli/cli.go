@@ -145,6 +145,13 @@ func (a *application) uploadCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
+		if !a.json {
+			iconStatus := "未提供"
+			if len(parsed.Icon) > 0 {
+				iconStatus = fmt.Sprintf("%s / %d 字节", parsed.Metadata.IconMIME, len(parsed.Icon))
+			}
+			_, _ = fmt.Fprintf(a.deps.Err, "解析结果：%s (%s)，图标：%s\n", parsed.Metadata.Name, parsed.Metadata.Identifier, iconStatus)
+		}
 		api, err := a.api()
 		if err != nil {
 			return err
@@ -160,7 +167,11 @@ func (a *application) uploadCommand() *cobra.Command {
 		message := fmt.Sprintf("上传成功：%s %s (%s)", result.App.Slug, result.Version.VersionName, result.Version.BuildNumber)
 		if result.Duplicate {
 			message = fmt.Sprintf("文件已存在：%s %s (%s)", result.App.Slug, result.Version.VersionName, result.Version.BuildNumber)
-			if result.IconUpdated {
+			if result.NameUpdated && result.IconUpdated {
+				message = fmt.Sprintf("文件已存在，已更新名称和图标：%s %s (%s)", result.App.Slug, result.Version.VersionName, result.Version.BuildNumber)
+			} else if result.NameUpdated {
+				message = fmt.Sprintf("文件已存在，已更新名称：%s %s (%s)", result.App.Slug, result.Version.VersionName, result.Version.BuildNumber)
+			} else if result.IconUpdated {
 				message = fmt.Sprintf("文件已存在，已更新图标：%s %s (%s)", result.App.Slug, result.Version.VersionName, result.Version.BuildNumber)
 			}
 		}
